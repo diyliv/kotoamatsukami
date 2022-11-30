@@ -1,6 +1,9 @@
 package peer
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/diyliv/p2p/internal/client"
 	"github.com/diyliv/p2p/internal/models"
+	rsaenc "github.com/diyliv/p2p/pkg/rsa"
 )
 
 var (
@@ -19,11 +23,13 @@ var (
 )
 
 type Peer struct {
-	Connections map[string][]string
-	connections []string
-	Ip          string
-	Port        string
-	JoinedAt    time.Time
+	Connections      map[string][]string `json:"connections"`
+	Ip               string              `json:"peer_ip"`
+	Port             string              `json:"peer_port"`
+	ClientPrivateKey *rsa.PrivateKey     `json:"peer_private_key"`
+	ClientPublicKey  rsa.PublicKey       `json:"peer_public_key"`
+	writePrivKeyCh   chan bool
+	JoinedAt         time.Time `json:"joined_at"`
 }
 
 func NewPeer(addr string) (*Peer, error) {
@@ -32,11 +38,20 @@ func NewPeer(addr string) (*Peer, error) {
 	if len(addrInfo) != 2 {
 		return nil, errInvalidCreds
 	}
+
+	keys, err := rsaenc.GenerateKeys()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Peer{
-		Connections: make(map[string][]string),
-		Ip:          addrInfo[0],
-		Port:        ":" + addrInfo[1],
-		JoinedAt:    time.Now().Local(),
+		Connections:      make(map[string][]string),
+		Ip:               addrInfo[0],
+		Port:             ":" + addrInfo[1],
+		ClientPrivateKey: keys,
+		ClientPublicKey:  keys.PublicKey,
+		writePrivKeyCh:   make(chan bool, 1),
+		JoinedAt:         time.Now().Local(),
 	}, nil
 }
 
@@ -47,35 +62,28 @@ func (peer *Peer) Run(HandleServer func(*Peer), HandleClient func(*Peer)) {
 }
 
 func (peer *Peer) LinkConnection(addrs []string) {
-	fmt.Println("generating keys")
-	peer.Connections[peer.Port] = append(peer.Connections[peer.Port], addrs...)
-	// peer.Connections[peer.Port] = append(peer.Connections[peer.Port], addrs)
-	os.Stdin.Write([]byte("connecting\n"))
+	peer.Connections[peer.Port] = addrs
 }
 
 func (peer *Peer) SendMessageToAll(msg string) {
 	var userMsg = &models.Message{
 		From: peer.Ip + peer.Port,
+		Key:  peer.ClientPrivateKey,
 		Body: msg,
 	}
 
 	val, ok := peer.Connections[peer.Port]
 	if !ok {
-		fmt.Println("you're not connectd to any peer")
+		fmt.Println("you're not connected to any peer")
 	}
 
-	for idx, value := range val {
-		userMsg.To = value
+	for _, v := range val {
+		userMsg.To = v
 		if err := peer.Send(userMsg); err != nil {
-			val[idx] = val[len(val)-1]
-			log.Printf("unable to connect: %v\n", err)
-			break
+			panic(err)
 		}
-		log.Println("reconnecting...")
 	}
-	val = val[:len(val)-1]
-	fmt.Println(val)
-	peer.Send(userMsg)
+
 }
 
 func (peer *Peer) Send(userMsg *models.Message) error {
@@ -86,22 +94,38 @@ func (peer *Peer) Send(userMsg *models.Message) error {
 	}
 	defer conn.Close()
 
-	m, err := json.Marshal(*userMsg)
-	if err != nil {
-		log.Println(err)
-		return err
+	var privKey struct {
+		Key *rsa.PrivateKey `json:"key"`
+		Msg []byte          `json:"msg"`
 	}
 
-	if _, err := conn.Write([]byte(m)); err != nil {
+	m, err := json.Marshal(userMsg)
+	if err != nil {
 		log.Println(err)
-		return err
+	}
+
+	encData, err := rsaenc.EncryptOAEP(sha256.New(), rand.Reader, &peer.ClientPublicKey, m)
+	if err != nil {
+		log.Printf("Error while encrypting data: %v\n", err)
+	}
+
+	privKey.Key = peer.ClientPrivateKey
+	privKey.Msg = encData
+
+	finM, err := json.Marshal(privKey)
+	if err != nil {
+		panic(err)
+	}
+
+	if _, err := conn.Write(finM); err != nil {
+		log.Println(err)
 	}
 
 	return nil
 }
 
 func (peer *Peer) AllPeers() {
-	for v := range peer.Connections {
+	for _, v := range peer.Connections {
 		fmt.Println("|", v)
 	}
 }
@@ -110,8 +134,8 @@ func HandleClient(peer *Peer) {
 	for {
 		msg := client.InputString()
 		cmd := strings.Split(msg, " ")
-		switch cmd[0] {
 
+		switch cmd[0] {
 		case "/all":
 			peer.AllPeers()
 		case "/exit":
@@ -125,7 +149,7 @@ func HandleClient(peer *Peer) {
 }
 
 func HandleServer(peer *Peer) {
-	lis, err := net.Listen("tcp", peer.Port)
+	lis, err := net.Listen("tcp", "192.168.1.9"+peer.Port)
 	if err != nil {
 		panic(err)
 	}
@@ -142,22 +166,37 @@ func HandleServer(peer *Peer) {
 
 func handleConnection(peer *Peer, conn net.Conn) {
 	defer conn.Close()
-	log.Printf("got connection from %s\n", conn.RemoteAddr().String())
 	var msg string
-	buff := make([]byte, 1024)
-	var data *models.Message
+	buff := make([]byte, 2048)
+
+	var data models.Message
 
 	for {
-		len, err := conn.Read(buff)
+		length, err := conn.Read(buff)
 		if err != nil {
 			break
 		}
-
-		msg += string(buff[:len])
-		if err := json.Unmarshal([]byte(msg), &data); err != nil {
-			panic(err)
-		}
-		peer.LinkConnection([]string{data.From})
-		fmt.Println(data.Body)
+		msg += string(buff[:length])
 	}
+
+	var resp struct {
+		Key *rsa.PrivateKey `json:"key"`
+		Msg []byte          `json:"msg"`
+	}
+
+	if err := json.Unmarshal([]byte(msg), &resp); err != nil {
+		panic(err)
+	}
+
+	dec, err := rsaenc.DecryptOAEP(sha256.New(), rand.Reader, resp.Key, resp.Msg)
+	if err != nil {
+		panic(err)
+	}
+
+	if err := json.Unmarshal(dec, &data); err != nil {
+		panic(err)
+	}
+
+	peer.LinkConnection([]string{data.From})
+	fmt.Printf("[%s]: %s\n", conn.RemoteAddr().String(), data.Body)
 }
