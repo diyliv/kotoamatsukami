@@ -1,7 +1,10 @@
 package models
 
+import "crypto/rsa"
+
 type Message struct {
-	From string
-	To   string
-	Body string
+	Key  *rsa.PrivateKey `json:"key"`
+	From string          `json:"from_peer"`
+	To   string          `json:"recipient_peer"`
+	Body string          `json:"body"`
 }
