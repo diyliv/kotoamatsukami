@@ -3,9 +3,6 @@ package rsa
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/sha512"
-	"encoding/base64"
 	"hash"
 	"io"
 	"log"
@@ -59,31 +56,4 @@ func DecryptOAEP(hash hash.Hash, random io.Reader, privKey *rsa.PrivateKey, msg 
 	}
 
 	return decryptedBytes, nil
-}
-
-func Encrypt(msg []byte, pubKey rsa.PublicKey) string {
-
-	rng := rand.Reader
-	cipherText, err := rsa.EncryptOAEP(sha512.New(), rng, &pubKey, []byte(msg), nil)
-	if err != nil {
-		log.Printf("error while encrypting: %v\n", err)
-	}
-
-	return base64.StdEncoding.EncodeToString(cipherText)
-}
-
-func Decrypt(encryptedMsg string, privKey *rsa.PrivateKey) string {
-	cipherText, err := base64.StdEncoding.DecodeString(encryptedMsg)
-	if err != nil {
-		log.Printf("error while decoding encrypted message: %v\n", err)
-	}
-
-	rng := rand.Reader
-
-	plainText, err := rsa.DecryptOAEP(sha256.New(), rng, privKey, cipherText, nil)
-	if err != nil {
-		log.Printf("error while decrypting message: %v\n", err)
-	}
-
-	return string(plainText)
 }
