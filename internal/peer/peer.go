@@ -1,9 +1,7 @@
 package peer
 
 import (
-	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,13 +21,14 @@ var (
 )
 
 type Peer struct {
-	Connections      map[string][]string `json:"connections"`
-	Ip               string              `json:"peer_ip"`
-	Port             string              `json:"peer_port"`
-	ClientPrivateKey *rsa.PrivateKey     `json:"peer_private_key"`
-	ClientPublicKey  rsa.PublicKey       `json:"peer_public_key"`
-	writePrivKeyCh   chan bool
-	JoinedAt         time.Time `json:"joined_at"`
+	Connections           map[string][]string      `json:"connections"`
+	Ip                    string                   `json:"peer_ip"`
+	Port                  string                   `json:"peer_port"`
+	ClientPrivateKey      *rsa.PrivateKey          `json:"peer_private_key"`
+	ClientPublicKey       rsa.PublicKey            `json:"peer_public_key"`
+	InterlocutorPublicKey rsa.PublicKey            `json:"interlocutor_key"`
+	CheckKeys             map[string]rsa.PublicKey `json:"check_keys"`
+	JoinedAt              time.Time                `json:"joined_at"`
 }
 
 func NewPeer(addr string) (*Peer, error) {
@@ -50,7 +49,7 @@ func NewPeer(addr string) (*Peer, error) {
 		Port:             ":" + addrInfo[1],
 		ClientPrivateKey: keys,
 		ClientPublicKey:  keys.PublicKey,
-		writePrivKeyCh:   make(chan bool, 1),
+		CheckKeys:        make(map[string]rsa.PublicKey),
 		JoinedAt:         time.Now().Local(),
 	}, nil
 }
@@ -63,12 +62,27 @@ func (peer *Peer) Run(HandleServer func(*Peer), HandleClient func(*Peer)) {
 
 func (peer *Peer) LinkConnection(addrs []string) {
 	peer.Connections[peer.Port] = addrs
+
+	conn, err := net.Dial("tcp", addrs[0])
+	if err != nil {
+		log.Println(err)
+	}
+
+	defer conn.Close()
+
+	handshake := models.NewHandShake(peer.Port, peer.ClientPublicKey)
+	m, err := json.Marshal(handshake)
+	if err != nil {
+		log.Println(err)
+	}
+	if _, err := conn.Write(m); err != nil {
+		panic(err)
+	}
 }
 
 func (peer *Peer) SendMessageToAll(msg string) {
 	var userMsg = &models.Message{
 		From: peer.Ip + peer.Port,
-		Key:  peer.ClientPrivateKey,
 		Body: msg,
 	}
 
@@ -89,36 +103,18 @@ func (peer *Peer) SendMessageToAll(msg string) {
 func (peer *Peer) Send(userMsg *models.Message) error {
 	conn, err := net.Dial("tcp", userMsg.To)
 	if err != nil {
-		conn.Close()
+		log.Println(err)
 		return err
 	}
 	defer conn.Close()
 
-	var privKey struct {
-		Key *rsa.PrivateKey `json:"key"`
-		Msg []byte          `json:"msg"`
-	}
-
 	m, err := json.Marshal(userMsg)
-	if err != nil {
-		log.Println(err)
-	}
-
-	encData, err := rsaenc.EncryptOAEP(sha256.New(), rand.Reader, &peer.ClientPublicKey, m)
-	if err != nil {
-		log.Printf("Error while encrypting data: %v\n", err)
-	}
-
-	privKey.Key = peer.ClientPrivateKey
-	privKey.Msg = encData
-
-	finM, err := json.Marshal(privKey)
 	if err != nil {
 		panic(err)
 	}
 
-	if _, err := conn.Write(finM); err != nil {
-		log.Println(err)
+	if _, err := conn.Write(m); err != nil {
+		panic(err)
 	}
 
 	return nil
@@ -149,19 +145,17 @@ func HandleClient(peer *Peer) {
 }
 
 func HandleServer(peer *Peer) {
-	lis, err := net.Listen("tcp", "192.168.1.9"+peer.Port)
+	lis, err := net.Listen("tcp", peer.Port)
 	if err != nil {
 		panic(err)
 	}
 	defer lis.Close()
 
-	for {
-		conn, err := lis.Accept()
-		if err != nil {
-			panic(err)
-		}
-		go handleConnection(peer, conn)
+	conn, err := lis.Accept()
+	if err != nil {
+		panic(err)
 	}
+	go handleConnection(peer, conn)
 }
 
 func handleConnection(peer *Peer, conn net.Conn) {
@@ -178,22 +172,9 @@ func handleConnection(peer *Peer, conn net.Conn) {
 		}
 		msg += string(buff[:length])
 	}
+	fmt.Println(msg)
 
-	var resp struct {
-		Key *rsa.PrivateKey `json:"key"`
-		Msg []byte          `json:"msg"`
-	}
-
-	if err := json.Unmarshal([]byte(msg), &resp); err != nil {
-		panic(err)
-	}
-
-	dec, err := rsaenc.DecryptOAEP(sha256.New(), rand.Reader, resp.Key, resp.Msg)
-	if err != nil {
-		panic(err)
-	}
-
-	if err := json.Unmarshal(dec, &data); err != nil {
+	if err := json.Unmarshal([]byte(msg), &data); err != nil {
 		panic(err)
 	}
 
