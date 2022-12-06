@@ -54,6 +54,5 @@ func DecryptOAEP(hash hash.Hash, random io.Reader, privKey *rsa.PrivateKey, msg 
 
 		decryptedBytes = append(decryptedBytes, decryptedBlockBytes...)
 	}
-
 	return decryptedBytes, nil
 }
