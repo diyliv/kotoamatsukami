@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/gorilla/mux v1.8.0
 	github.com/mattn/go-colorable v0.1.9 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
