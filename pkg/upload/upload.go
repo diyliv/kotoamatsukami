@@ -43,8 +43,6 @@ func (h *handler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	fmt.Println(handler)
-
 	dst, err := os.Create(fmt.Sprintf("files/%s", handler.Filename))
 	if err != nil {
 		h.logger.Error("Error while creating file: " + err.Error())
@@ -57,7 +55,7 @@ func (h *handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, "/", http.StatusOK)
+	http.Redirect(w, r, "http://localhost:8080/", http.StatusSeeOther)
 }
 
 func (h *handler) writeResponse(w http.ResponseWriter, code int, data interface{}) {
