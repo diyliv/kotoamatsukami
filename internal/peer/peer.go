@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mathrand "math/rand"
 	"net"
 	"os"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/diyliv/p2p/internal/client"
 	"github.com/diyliv/p2p/internal/models"
+	httpserver "github.com/diyliv/p2p/internal/server"
 	rsaenc "github.com/diyliv/p2p/pkg/rsa"
 )
 
@@ -68,7 +70,7 @@ func NewPeer(addr string, logger *zap.Logger) (*Peer, error) {
 
 func (peer *Peer) Run(HandleServer func(*Peer), HandleClient func(*Peer)) {
 	color.Magenta("[system] Starting listening on %s", os.Args[1])
-	color.Magenta("[system] Available commands\n/all - lists all your connections\n/connect [:port] - make connection with some peer\n/exit - quit the program")
+	color.Magenta("[system] Available commands\n/all - lists all your connections\n/connect [:port] - make connection with some peer\n/exit - quit the program\n/upload - start http server and upload file\n")
 	go HandleServer(peer)
 	HandleClient(peer)
 }
@@ -93,23 +95,45 @@ func (peer *Peer) removeElement(slice []string, idx int) []string {
 	return slice[:len(slice)-1]
 }
 
+func (peer *Peer) LowerUpper(str string) string {
+	var res string
+
+	mathrand.Seed(time.Now().UnixNano())
+
+	for i := 0; i < len(str); i++ {
+		a := mathrand.Intn(100)
+
+		if a < 50 {
+			newStr := strings.ToUpper(string(str[i]))
+			res += newStr
+		} else {
+			newStr := strings.ToLower(string(str[i]))
+			res += newStr
+		}
+	}
+	return res
+}
+
 func (peer *Peer) LinkConnection(addrs []string) {
-	peer.mu.Lock()
-	peer.Connections[peer.Port] = append(peer.Connections[peer.Port], addrs...)
-	connections := peer.removeDuplicates(addrs)
-	peer.mu.Unlock()
 	var conn net.Conn
 	var err error
 
+	if addrs[0] == peer.Port {
+		underline := color.New(color.FgRed).Add(color.Underline)
+		color.Magenta("[system] You're trying to connect to %s\n", underline.Sprintf("Yourself. %s", peer.LowerUpper("crazy isn`t it?")))
+		return
+	}
+
 	peer.mu.Lock()
-	for i := 0; i < len(connections); i++ {
-		connections[i] = strings.Trim(connections[i], "\r\n")
-		conn, err = net.Dial("tcp", connections[i])
+	for i := 0; i < len(addrs); i++ {
+		addrs[i] = strings.Trim(addrs[i], "\r\n")
+		conn, err = net.Dial("tcp", addrs[i])
 		if err != nil {
-			peer.logger.Sugar().Errorf("Error while dialing with: %s. Error: %v\n", connections[i], err)
-			color.Red("[system] Error while dialing with %s", connections[i])
+			peer.logger.Sugar().Errorf("Error while dialing with: %s. Error: %v\n", addrs[i], err)
+			color.Red("[system] Error while dialing with %s", addrs[i])
 			break
 		}
+		peer.Connections[peer.Port] = append(peer.Connections[peer.Port], addrs...)
 	}
 	peer.mu.Unlock()
 
@@ -161,11 +185,16 @@ func (peer *Peer) SendMessageToAll(msg string) {
 		Body: []byte(msg),
 	}
 
+	if msg == "" {
+		return
+	}
+
 	peer.mu.Lock()
-	val, ok := peer.Connections[peer.Port]
-	if !ok {
+	val := peer.Connections[peer.Port]
+	if len(val) == 0 {
 		color.Yellow("You're not connected to any peer.")
 	}
+
 	connections := peer.removeDuplicates(val)
 	peer.Connections[peer.Port] = connections
 	peer.mu.Unlock()
@@ -173,6 +202,7 @@ func (peer *Peer) SendMessageToAll(msg string) {
 	for _, v := range connections {
 		userMsg.To = v
 		if err := peer.Send(userMsg); err != nil {
+			color.Red("[system] error while sending message: %v\n", err)
 			peer.logger.Error("Error while sending message: " + err.Error())
 		}
 	}
@@ -240,7 +270,7 @@ func (peer *Peer) AllPeers() {
 	if len(connections) == 0 {
 		color.Blue("No connections.")
 	} else {
-		color.Blue(fmt.Sprintf("|%s\n", peer.Connections[peer.Port]))
+		color.Blue(fmt.Sprintf("|%s\n", peer.removeDuplicates(peer.Connections[peer.Port])))
 	}
 	peer.mu.Unlock()
 }
@@ -258,6 +288,8 @@ func HandleClient(peer *Peer) {
 			os.Exit(0)
 		case "/connect":
 			peer.LinkConnection(cmd[1:])
+		case "/upload":
+			go httpserver.NewServer(peer.logger).StartHTTP()
 		default:
 			peer.SendMessageToAll(msg)
 		}
@@ -295,6 +327,7 @@ func handleConnection(peer *Peer, conn net.Conn) {
 	if err := json.Unmarshal([]byte(msg), &handshake); err != nil {
 		peer.logger.Error("Error while unmarshalling key: " + err.Error())
 	}
+
 	if handshake.Addr == "" {
 		var userMsg models.Message
 
@@ -313,7 +346,8 @@ func handleConnection(peer *Peer, conn net.Conn) {
 		if err := json.Unmarshal(decryptMsg, &resp); err != nil {
 			peer.logger.Error("Error while unmarshalling message:  " + err.Error())
 		}
-		fmt.Printf("[%s] %s\n", userMsg.From, string(resp.Body))
+
+		color.Cyan("[%s] %s\n", userMsg.From, string(resp.Body))
 	}
 
 	respHandshake := models.NewHandShake(peer.Port, peer.ClientPublicKey)
