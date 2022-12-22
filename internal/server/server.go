@@ -23,6 +23,8 @@ func NewServer(logger *zap.Logger) *server {
 
 func (s *server) StartHTTP() {
 	color.Magenta("[system] Starting HTTP server on port :8080")
+	color.Magenta("[system] link for uploading files: http://localhost:8080/upload")
+	color.Magenta("[system] link for checking ur uploaded files: http://localhost:8080")
 
 	handler := upload.NewHandler(s.logger)
 
