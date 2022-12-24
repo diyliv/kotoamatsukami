@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
 	"net"
 	"os"
 	"strings"
@@ -75,53 +74,14 @@ func (peer *Peer) Run(HandleServer func(*Peer), HandleClient func(*Peer)) {
 	HandleClient(peer)
 }
 
-func (peer *Peer) removeDuplicates(slice []string) []string {
-	allKeys := make(map[string]bool)
-
-	resultSlice := make([]string, 0)
-
-	for _, value := range slice {
-		if _, v := allKeys[value]; !v {
-			allKeys[value] = true
-			resultSlice = append(resultSlice, value)
-		}
-	}
-
-	return resultSlice
-}
-
-func (peer *Peer) removeElement(slice []string, idx int) []string {
-	slice[idx] = slice[len(slice)-1]
-	return slice[:len(slice)-1]
-}
-
-func (peer *Peer) LowerUpper(str string) string {
-	var res string
-
-	mathrand.Seed(time.Now().UnixNano())
-
-	for i := 0; i < len(str); i++ {
-		a := mathrand.Intn(100)
-
-		if a < 50 {
-			newStr := strings.ToUpper(string(str[i]))
-			res += newStr
-		} else {
-			newStr := strings.ToLower(string(str[i]))
-			res += newStr
-		}
-	}
-	return res
-}
-
-func (peer *Peer) LinkConnection(addrs []string) {
+func (peer *Peer) LinkConnection(addrs []string) error {
 	var conn net.Conn
 	var err error
 
 	if addrs[0] == peer.Port {
 		underline := color.New(color.FgRed).Add(color.Underline)
-		color.Magenta("[system] You're trying to connect to %s\n", underline.Sprintf("Yourself. %s", peer.LowerUpper("crazy isn`t it?")))
-		return
+		color.Magenta("[system] You're trying to connect to %s\n", underline.Sprintf("Yourself. %s", peer.lowerUpper("crazy isn't it?")))
+		return nil
 	}
 
 	peer.mu.Lock()
@@ -130,8 +90,7 @@ func (peer *Peer) LinkConnection(addrs []string) {
 		conn, err = net.Dial("tcp", addrs[i])
 		if err != nil {
 			peer.logger.Sugar().Errorf("Error while dialing with: %s. Error: %v\n", addrs[i], err)
-			color.Red("[system] Error while dialing with %s", addrs[i])
-			break
+			return err
 		}
 		peer.Connections[peer.Port] = append(peer.Connections[peer.Port], addrs...)
 	}
@@ -139,7 +98,7 @@ func (peer *Peer) LinkConnection(addrs []string) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			color.Magenta("[system] Looks like the peer you're trying to connect is offline. Try another one.")
+			color.Red("[system] Host unavailable.")
 		}
 	}()
 
@@ -151,11 +110,13 @@ func (peer *Peer) LinkConnection(addrs []string) {
 	if err != nil {
 		color.Red("[system] System error: %v\n", err)
 		peer.logger.Error("Error while marshalling key: " + err.Error())
+		return err
 	}
 
 	if _, err := conn.Write(m); err != nil {
 		color.Red("[system] System error: %v\n", err)
 		peer.logger.Error("Error while writing key: " + err.Error())
+		return err
 	}
 
 	buf := make([]byte, 2048)
@@ -164,6 +125,7 @@ func (peer *Peer) LinkConnection(addrs []string) {
 	if err != nil {
 		color.Red("[system] System error: %v\n", err)
 		peer.logger.Error("Error while reading response from peer: " + err.Error())
+		return err
 	}
 
 	var respHandshake models.Handshake
@@ -171,107 +133,27 @@ func (peer *Peer) LinkConnection(addrs []string) {
 	if err := json.Unmarshal(buf[:l], &respHandshake); err != nil {
 		color.Red("[system] System error: %v\n", err)
 		peer.logger.Error("Error while unmarshalling response: " + err.Error())
+		return err
 	}
+
 	peer.mu.Lock()
-	defer peer.mu.Unlock()
 	peer.CheckKeys[respHandshake.Addr] = respHandshake.PublicKey
 	peer.InterlocutorPublicKey = respHandshake.PublicKey
-
-}
-
-func (peer *Peer) SendMessageToAll(msg string) {
-	var userMsg = &models.Message{
-		From: peer.Ip + peer.Port,
-		Body: []byte(msg),
-	}
-
-	if msg == "" {
-		return
-	}
-
-	peer.mu.Lock()
-	val := peer.Connections[peer.Port]
-	if len(val) == 0 {
-		color.Yellow("You're not connected to any peer.")
-	}
-
-	connections := peer.removeDuplicates(val)
-	peer.Connections[peer.Port] = connections
 	peer.mu.Unlock()
 
-	for _, v := range connections {
-		userMsg.To = v
-		if err := peer.Send(userMsg); err != nil {
-			color.Red("[system] error while sending message: %v\n", err)
-			peer.logger.Error("Error while sending message: " + err.Error())
-		}
-	}
-
-}
-
-func (peer *Peer) Send(userMsg *models.Message) error {
-	conn, err := net.Dial("tcp", userMsg.To)
-	if err != nil {
-		color.Red("[system] %s disconnected\n", userMsg.To)
-		peer.mu.Lock()
-		defer peer.mu.Unlock()
-		connections := peer.Connections[peer.Port]
-		for idx, val := range connections {
-			if val == userMsg.To {
-				updatedConnections := peer.removeElement(peer.Connections[peer.Port], idx)
-				peer.Connections[peer.Port] = updatedConnections
-			}
-		}
-		return err
-	}
-	defer conn.Close()
-
-	m, err := json.Marshal(userMsg)
-	if err != nil {
-		peer.logger.Error("Error while marshalling message: " + err.Error())
-		return err
-	}
-
-	peer.mu.Lock()
-	val, ok := peer.CheckKeys[userMsg.To]
-	if !ok {
-		peer.logger.Error("Kinda strange. You dont have public key from this user: " + userMsg.To)
-	}
-	peer.mu.Unlock()
-
-	encryptMsg, err := rsaenc.EncryptOAEP(sha256.New(), rand.Reader, &val, m)
-	if err != nil {
-		peer.logger.Error("Error while encrypting your message: " + err.Error())
-		return err
-	}
-
-	var answer models.Message
-	answer.From = peer.Port
-	answer.To = userMsg.To
-	answer.Body = encryptMsg
-
-	finM, err := json.Marshal(answer)
-	if err != nil {
-		peer.logger.Error("Error while marshalling message: " + err.Error())
-		return err
-	}
-
-	if _, err := conn.Write(finM); err != nil {
-		peer.logger.Error("Error while writing mesasge: " + err.Error())
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func (peer *Peer) AllPeers() {
 	peer.mu.Lock()
+
 	connections := peer.Connections[peer.Port]
 	if len(connections) == 0 {
 		color.Blue("No connections.")
 	} else {
 		color.Blue(fmt.Sprintf("|%s\n", peer.removeDuplicates(peer.Connections[peer.Port])))
 	}
+
 	peer.mu.Unlock()
 }
 
@@ -290,6 +172,16 @@ func HandleClient(peer *Peer) {
 			peer.LinkConnection(cmd[1:])
 		case "/upload":
 			go httpserver.NewServer(peer.logger).StartHTTP()
+		case "/me":
+			if len(cmd) <= 1 {
+				defer func() {
+					if r := recover(); r != nil {
+						color.Magenta("[system] Usage of /me command: e.g /me [:addr] [message]")
+						HandleClient(peer)
+					}
+				}()
+			}
+			peer.DirectMessage(cmd[1], cmd[2])
 		default:
 			peer.SendMessageToAll(msg)
 		}
